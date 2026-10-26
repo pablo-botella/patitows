@@ -27,6 +27,7 @@ type Server struct {
 	sites   map[string]*siteHandler // by host
 	slots   map[string]*blobSlot    // by blob id
 	servers []*http.Server
+	tlsLog  *tlsErrorLog
 	stopped chan struct{}
 	stop    sync.Once
 }
@@ -92,13 +93,15 @@ func (s *Server) Run() error {
 	tlsConfig := m.TLSConfig()
 	tlsConfig.MinVersion = tls.VersionTLS12
 
+	s.tlsLog = newTLSErrorLog()
 	errc := make(chan error, 2)
 	if s.cfg.Listen.HTTP != "" {
 		ln, err := net.Listen("tcp", s.cfg.Listen.HTTP)
 		if err != nil {
+			s.tlsLog.stop()
 			return err
 		}
-		srv := &http.Server{Handler: http.HandlerFunc(redirectToHTTPS), ReadHeaderTimeout: 10 * time.Second}
+		srv := &http.Server{Handler: http.HandlerFunc(redirectToHTTPS), ReadHeaderTimeout: 10 * time.Second, ErrorLog: s.tlsLog.logger()}
 		s.servers = append(s.servers, srv)
 		log.Printf("HTTP redirect listening on %s", s.cfg.Listen.HTTP)
 		go func() { errc <- srv.Serve(ln) }()
@@ -108,7 +111,7 @@ func (s *Server) Run() error {
 		s.Stop()
 		return err
 	}
-	srv := &http.Server{Handler: s, TLSConfig: tlsConfig, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: s, TLSConfig: tlsConfig, ReadHeaderTimeout: 10 * time.Second, ErrorLog: s.tlsLog.logger()}
 	s.servers = append(s.servers, srv)
 	log.Printf("HTTPS listening on %s (staging=%v)", s.cfg.Listen.HTTPS, s.cfg.ACME.Staging)
 	go func() { errc <- srv.ServeTLS(ln, "", "") }()
@@ -141,6 +144,9 @@ func (s *Server) Stop() error {
 		}
 		for _, slot := range s.slots {
 			slot.closeNow()
+		}
+		if s.tlsLog != nil {
+			s.tlsLog.stop()
 		}
 		close(s.stopped)
 	})
