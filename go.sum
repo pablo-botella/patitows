@@ -1,5 +1,7 @@
 github.com/pablo-botella/cargoxml v0.5.2 h1:A4KKLUXgeW8Vc1WVPs+DvZb/ODCuDWeKClvyhP0+cMI=
 github.com/pablo-botella/cargoxml v0.5.2/go.mod h1:q8uY6DQW7eTx2RuxTPfGbnoDks361idhJybuqQziCek=
+github.com/pablo-botella/mskblob v0.5.4 h1:XJoJwwlJ2hSFipAyXvrYp6LV+Zl2FUZJBN2WXent/8U=
+github.com/pablo-botella/mskblob v0.5.4/go.mod h1:mlpyEGmoPak2U1P5V5s0dMplUfpwwaL5WkGOUsum9e4=
 golang.org/x/crypto v0.58.0 h1:COkYLr4k7nDI4r6QtMML2AfzeIswWHAJthLS6K/M/54=
 golang.org/x/crypto v0.58.0/go.mod h1:Xh+kl5A+M0gMiWDytH2Hhr5Z7WbNCpv/eB/EFgfSk+w=
 golang.org/x/net v0.60.0 h1:79p50tfZlm0J9YfoDsSi639qSXNGVwEzOPLCxM2FsYU=

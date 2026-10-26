@@ -1,4 +1,4 @@
-package main
+package patitows
 
 import (
 	"encoding/xml"
@@ -14,20 +14,25 @@ import (
 
 // Config is the whole patitows configuration, read from an XML file:
 //
-//	<patitows>
+//	<patitows id="main">
 //	  <acme cache="certs" email="admin@example.com" staging="true"/>
 //	  <listen https=":443" http=""/>
 //	  <site name="example">
 //	    <host name="example.com"/>
 //	    <host name="www.example.com"/>
+//	    <blob id="example-web" file="~/sites/example-20261026180500.blob" base="/"/>
 //	  </site>
 //	</patitows>
 //
-// <acme> with cache and <listen> with https and http are mandatory: there
-// are no defaults. An empty http disables the HTTP-to-HTTPS redirect.
-// Unknown attributes and elements are ignored.
+// The instance id, <acme> with cache and <listen> with https and http are
+// mandatory: there are no defaults. An empty http disables the
+// HTTP-to-HTTPS redirect. A site has zero or more blobs; every blob needs
+// an id unique in the whole file, a file and a base path. Unknown
+// attributes and elements are ignored.
 type Config struct {
 	cargoxml.NullXmlConsumer
+	ID     string // instance id, unique on the system
+	Path   string // absolute path of the configuration file
 	ACME   ACMEConfig
 	Listen ListenConfig
 	Sites  []*Site
@@ -60,6 +65,16 @@ type Site struct {
 	cargoxml.NullXmlConsumer
 	Name  string
 	Hosts []string
+	Blobs []*BlobConfig
+}
+
+// BlobConfig is a <blob> resource: an mskblob file mounted under Base.
+type BlobConfig struct {
+	cargoxml.NullXmlConsumer
+	ID   string
+	File string // as written in the configuration
+	Base string // URL path prefix, starting and ending with "/"
+	Path string // File resolved: "~" expanded, relative to the config file
 }
 
 // siteHost is the consumer of a <host> element inside a <site>.
@@ -70,13 +85,17 @@ type siteHost struct {
 
 // LoadConfig reads and validates the configuration file at path.
 func LoadConfig(path string) (*Config, error) {
-	f, err := os.Open(path)
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(abs)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	cfg := &Config{}
+	cfg := &Config{Path: abs}
 	d := cargoxml.NewDecoderWithCargo(xml.NewDecoder(f))
 	d.Root = cfg
 	if err := d.Parse(); err != nil {
@@ -85,8 +104,12 @@ func LoadConfig(path string) (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
-	if !filepath.IsAbs(cfg.ACME.Cache) {
-		cfg.ACME.Cache = filepath.Join(filepath.Dir(path), cfg.ACME.Cache)
+	dir := filepath.Dir(abs)
+	cfg.ACME.Cache = resolvePath(cfg.ACME.Cache, dir)
+	for _, s := range cfg.Sites {
+		for _, b := range s.Blobs {
+			b.Path = resolvePath(b.File, dir)
+		}
 	}
 	return cfg, nil
 }
@@ -100,7 +123,46 @@ func (c *Config) Hosts() []string {
 	return hosts
 }
 
+// Blob returns the blob resource with the given id, or nil.
+func (c *Config) Blob(id string) *BlobConfig {
+	for _, s := range c.Sites {
+		for _, b := range s.Blobs {
+			if b.ID == id {
+				return b
+			}
+		}
+	}
+	return nil
+}
+
+// ExpandHome replaces a leading "~" with the current user's home directory.
+func ExpandHome(p string) string {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	return filepath.Join(home, p[1:])
+}
+
+// resolvePath expands "~" and makes a relative path relative to dir.
+func resolvePath(p, dir string) string {
+	p = ExpandHome(p)
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(dir, p)
+	}
+	return p
+}
+
 func (c *Config) validate() error {
+	if c.ID == "" {
+		return errors.New("<patitows> id is required")
+	}
+	if !ValidInstanceID(c.ID) {
+		return fmt.Errorf("invalid instance id %q (use letters, digits, '-', '_' and '.')", c.ID)
+	}
 	if !c.ACME.seen {
 		return errors.New("missing <acme>")
 	}
@@ -124,6 +186,7 @@ func (c *Config) validate() error {
 	}
 	names := map[string]bool{}
 	hosts := map[string]string{}
+	ids := map[string]bool{}
 	for _, s := range c.Sites {
 		if s.Name == "" {
 			return errors.New("site without name")
@@ -141,8 +204,41 @@ func (c *Config) validate() error {
 			}
 			hosts[h] = s.Name
 		}
+		bases := map[string]bool{}
+		for _, b := range s.Blobs {
+			if b.ID == "" {
+				return fmt.Errorf("site %q: blob without id", s.Name)
+			}
+			if ids[b.ID] {
+				return fmt.Errorf("blob id %q defined twice", b.ID)
+			}
+			ids[b.ID] = true
+			if b.File == "" {
+				return fmt.Errorf("blob %q: file is required", b.ID)
+			}
+			if !strings.HasPrefix(b.Base, "/") || !strings.HasSuffix(b.Base, "/") {
+				return fmt.Errorf("blob %q: base must start and end with '/'", b.ID)
+			}
+			if bases[b.Base] {
+				return fmt.Errorf("site %q: base %q used by two blobs", s.Name, b.Base)
+			}
+			bases[b.Base] = true
+		}
 	}
 	return nil
+}
+
+// ValidInstanceID reports whether id is usable as an instance id: letters,
+// digits, '-', '_' and '.'.
+func ValidInstanceID(id string) bool {
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+		default:
+			return false
+		}
+	}
+	return id != ""
 }
 
 func (c *Config) OnXmlStart(d *cargoxml.DecoderWithCargo, frame *cargoxml.DecoderStackFrame) error {
@@ -151,6 +247,14 @@ func (c *Config) OnXmlStart(d *cargoxml.DecoderWithCargo, frame *cargoxml.Decode
 	}
 	frame.SkipUnknownChildren = true
 	return nil
+}
+
+func (c *Config) OnXmlAttribute(d *cargoxml.DecoderWithCargo, attr *xml.Attr) bool {
+	if attr.Name.Local == "id" {
+		c.ID = attr.Value
+		return true
+	}
+	return false
 }
 
 func (c *Config) OnXmlChildStart(d *cargoxml.DecoderWithCargo, child *cargoxml.DecoderStackFrame) error {
@@ -217,8 +321,13 @@ func (s *Site) OnXmlAttribute(d *cargoxml.DecoderWithCargo, attr *xml.Attr) bool
 }
 
 func (s *Site) OnXmlChildStart(d *cargoxml.DecoderWithCargo, child *cargoxml.DecoderStackFrame) error {
-	if child.NodeName.Local == "host" {
+	switch child.NodeName.Local {
+	case "host":
 		child.Consumer = &siteHost{}
+	case "blob":
+		b := &BlobConfig{}
+		s.Blobs = append(s.Blobs, b)
+		child.Consumer = b
 	}
 	return nil
 }
@@ -238,4 +347,18 @@ func (h *siteHost) OnXmlAttribute(d *cargoxml.DecoderWithCargo, attr *xml.Attr) 
 		return true
 	}
 	return false
+}
+
+func (b *BlobConfig) OnXmlAttribute(d *cargoxml.DecoderWithCargo, attr *xml.Attr) bool {
+	switch attr.Name.Local {
+	case "id":
+		b.ID = attr.Value
+	case "file":
+		b.File = attr.Value
+	case "base":
+		b.Base = attr.Value
+	default:
+		return false
+	}
+	return true
 }
